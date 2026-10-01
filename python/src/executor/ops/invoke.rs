@@ -59,7 +59,7 @@ pub(crate) fn get_annotations<'py>(
 /// evaluated in the function's module globals. Only this one annotation is
 /// evaluated: `typing.get_type_hints` fails as a whole when any other name in
 /// the signature exists only for type checkers.
-fn resolve_annotation<'py>(
+pub(crate) fn resolve_annotation<'py>(
     py: Python<'py>,
     func: &Py<PyAny>,
     annotation: &Bound<'py, PyAny>,
@@ -74,20 +74,6 @@ fn resolve_annotation<'py>(
     py.import("builtins")?
         .getattr("eval")?
         .call1((annotation, globals))
-}
-
-/// One resource argument: config-instantiated when per-run overrides exist,
-/// else the shared instance.
-fn resource_arg(
-    py: Python<'_>,
-    resource: &ResourceVariant,
-    overrides_dict: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if overrides_dict.is_some() {
-        resource.instantiate_config(py, overrides_dict)
-    } else {
-        Ok(resource.inner().clone_ref(py))
-    }
 }
 
 /// Enumerate `(name, optional annotation)` for every *injectable* parameter on
@@ -434,7 +420,7 @@ pub(crate) fn build_step_args(
             )?;
             args.push(loaded);
         } else if let Some(resource) = resources.get(&param_name) {
-            args.push(resource_arg(py, resource, overrides_dict)?);
+            args.push(resource.instantiate_config(py, None)?);
         } else {
             return Err(ConfigurationError::new_err(format!(
                 "Asset '{}': parameter '{}' does not match any upstream asset or resource",
@@ -820,7 +806,7 @@ pub(crate) fn execute_action_step(
                         )));
                     }
                     if let Some(resource) = resources.get(param_name) {
-                        args.push(resource_arg(py, resource, overrides_dict)?);
+                        args.push(resource.instantiate_config(py, None)?);
                     } else {
                         return Err(ConfigurationError::new_err(format!(
                             "Action '{}' on asset '{}': parameter '{}' does not \

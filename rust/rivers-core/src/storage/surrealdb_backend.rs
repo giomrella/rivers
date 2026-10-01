@@ -3666,9 +3666,9 @@ impl PerCodeLocationStorage for SurrealStorage {
                 "SELECT count() AS total FROM concurrency_slots \
                      WHERE lease_expires_at <= $now GROUP ALL; \
                  DELETE FROM concurrency_slots WHERE lease_expires_at <= $now; \
-                 SELECT run_id, code_location_id, tags, node_names, job_name, priority, partition_key, start_time, action \
+                 SELECT run_id, code_location_id, tags, node_names, job_name, priority, partition_key, start_time, action, config \
                      FROM runs WHERE status IN ['NotStarted', 'Started'] AND code_location_id = $cl; \
-                 SELECT run_id, code_location_id, tags, node_names, job_name, priority, partition_key, start_time, action \
+                 SELECT run_id, code_location_id, tags, node_names, job_name, priority, partition_key, start_time, action, config \
                      FROM runs WHERE status = 'Queued' AND code_location_id = $cl",
             )
             .bind(("now", now_ns))
@@ -4991,6 +4991,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::default(),
             action: action.map(String::from),
+            config: None,
         };
         let mat_event = |run_id: &str, ts: i64| EventRecord {
             code_location_id: cl.to_string(),
@@ -7113,6 +7114,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run).await.unwrap();
         let mat_event = EventRecord {
@@ -7187,6 +7189,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run).await.unwrap();
 
@@ -7242,6 +7245,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
 
         // First CREATE succeeds.
@@ -7289,6 +7293,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             };
             storage.create_run(&run).await.unwrap();
             all_runs.push(run);
@@ -7320,6 +7325,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         let run_fail = RunRecord {
             run_id: "fail".to_string(),
@@ -7335,6 +7341,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run_ok).await.unwrap();
         storage.create_run(&run_fail).await.unwrap();
@@ -7365,6 +7372,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             };
             storage.create_run(&run).await.unwrap();
         }
@@ -7441,6 +7449,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             };
             storage.create_run(&run).await.unwrap();
         }
@@ -7470,6 +7479,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: Some("delete".into()),
+            config: None,
         };
         storage.create_run(&action_run).await.unwrap();
         action_run.run_id = "run-compact".into();
@@ -7573,6 +7583,7 @@ mod tests {
                     block_reason: None,
                     launched_by: LaunchedBy::Manual { user: None },
                     action: None,
+                    config: None,
                 })
                 .await
                 .unwrap();
@@ -7625,6 +7636,7 @@ mod tests {
                         block_reason: None,
                         launched_by: LaunchedBy::Manual { user: None },
                         action: None,
+                        config: None,
                     })
                     .await
                     .unwrap();
@@ -7684,6 +7696,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             };
             storage.create_run(&run).await.unwrap();
         }
@@ -7725,6 +7738,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             };
             storage_w.create_run(&run).await.unwrap();
         });
@@ -7783,6 +7797,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             };
             storage.create_run(&run).await.unwrap();
         })
@@ -7843,6 +7858,7 @@ mod tests {
                 error: None,
                 launched_by: LaunchedBy::default(),
                 action: None,
+                config: None,
             };
             storage.create_backfill(&bf).await.unwrap();
         })
@@ -7954,6 +7970,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .collect();
 
@@ -7994,6 +8011,7 @@ mod tests {
                 block_reason: Some("global run limit".to_string()),
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             },
             RunRecord {
                 run_id: "queued_2".to_string(),
@@ -8009,6 +8027,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             },
         ];
 
@@ -8026,6 +8045,72 @@ mod tests {
         assert_eq!(r2.job_name.as_deref(), Some("my_job"));
         assert_eq!(r2.priority, -10);
         assert!(r2.block_reason.is_none());
+    }
+
+    /// A run keeps the config overrides it was launched with on every path a
+    /// launcher reads from: the record (`create_run`), the queue
+    /// (`enqueue_run`) and the coordinator's projection. A run launched with
+    /// the defaults reads back `None` on all of them.
+    #[tokio::test]
+    async fn test_run_config_round_trips_to_every_launcher_read() {
+        let storage = make_storage().await;
+        let config = r#"{"a":{"threshold":0.9,"mode":"full"}}"#;
+        let run = |id: &str, config: Option<&str>| RunRecord {
+            run_id: id.to_string(),
+            code_location_id: DEFAULT_CODE_LOCATION_ID.to_string(),
+            job_name: None,
+            status: RunStatus::Queued,
+            start_time: 1000,
+            end_time: None,
+            tags: vec![],
+            node_names: vec!["a".to_string()],
+            priority: 0,
+            partition_key: None,
+            block_reason: None,
+            launched_by: LaunchedBy::Manual { user: None },
+            action: None,
+            config: config.map(str::to_string),
+        };
+        storage
+            .create_run(&run("created", Some(config)))
+            .await
+            .unwrap();
+        storage
+            .enqueue_run(&run("queued", Some(config)))
+            .await
+            .unwrap();
+        storage.create_run(&run("defaults", None)).await.unwrap();
+
+        for id in ["created", "queued"] {
+            let got = storage.get_run(id).await.unwrap().unwrap();
+            assert_eq!(got.config.as_deref(), Some(config), "{id}");
+        }
+        let defaults = storage.get_run("defaults").await.unwrap().unwrap();
+        assert_eq!(defaults.config, None);
+
+        let (_, _, queued) = storage
+            .coordinator_tick_query(DEFAULT_CODE_LOCATION_ID)
+            .await
+            .unwrap();
+        assert_eq!(queued.len(), 3);
+        for info in queued {
+            let expected = (info.run_id != "defaults").then(|| config.to_string());
+            assert_eq!(info.config, expected, "{}", info.run_id);
+        }
+    }
+
+    /// A backfill keeps the config its child runs are launched with.
+    #[tokio::test]
+    async fn test_backfill_config_round_trips() {
+        let storage = make_storage().await;
+        let config = r#"{"a":{"mode":"full_refresh"}}"#;
+        let bf = BackfillRecord {
+            config: Some(config.to_string()),
+            ..make_backfill("bf_cfg", BackfillStatus::Requested, 1)
+        };
+        storage.create_backfill(&bf).await.unwrap();
+        let got = storage.get_backfill("bf_cfg").await.unwrap().unwrap();
+        assert_eq!(got.config.as_deref(), Some(config));
     }
 
     #[tokio::test]
@@ -8829,6 +8914,7 @@ mod tests {
                     block_reason: None,
                     launched_by: LaunchedBy::Manual { user: None },
                     action: None,
+                    config: None,
                 })
                 .await
                 .unwrap();
@@ -8884,6 +8970,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -8902,6 +8989,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -8920,6 +9008,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -9023,6 +9112,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -9041,6 +9131,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -9660,6 +9751,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         let run2 = RunRecord {
             run_id: "run_2".to_string(),
@@ -9675,6 +9767,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         let run3 = RunRecord {
             run_id: "run_3".to_string(),
@@ -9690,6 +9783,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run1).await.unwrap();
         storage.create_run(&run2).await.unwrap();
@@ -9738,6 +9832,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&mk("zzz", 1000)).await.unwrap();
         storage.create_run(&mk("mmm", 2000)).await.unwrap();
@@ -9776,6 +9871,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         let run2 = RunRecord {
             run_id: "run_2".to_string(),
@@ -9791,6 +9887,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         let run3 = RunRecord {
             run_id: "run_3".to_string(),
@@ -9806,6 +9903,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run1).await.unwrap();
         storage.create_run(&run2).await.unwrap();
@@ -10424,6 +10522,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run).await.unwrap();
 
@@ -10499,6 +10598,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: action.map(str::to_string),
+            config: None,
         };
 
         storage
@@ -10561,6 +10661,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run).await.unwrap();
 
@@ -10635,6 +10736,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&canceled).await.unwrap();
         assert!(
@@ -10682,6 +10784,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run).await.unwrap();
 
@@ -10730,6 +10833,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run).await.unwrap();
 
@@ -10785,6 +10889,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             }
         };
         for case in [
@@ -10893,6 +10998,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run).await.unwrap();
 
@@ -10946,6 +11052,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run).await.unwrap();
 
@@ -11015,6 +11122,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run).await.unwrap();
 
@@ -11087,6 +11195,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         storage.create_run(&run).await.unwrap();
 
@@ -11158,6 +11267,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: action.map(str::to_string),
+            config: None,
         };
 
         // A failed partitioned `delete` — floors p1 via the runs query.
@@ -11450,6 +11560,7 @@ mod tests {
                 }),
             },
             action: None,
+            config: None,
         };
         storage.create_backfill(&record).await.unwrap();
 
@@ -11505,6 +11616,7 @@ mod tests {
             error: None,
             launched_by: LaunchedBy::default(),
             action: None,
+            config: None,
         }
     }
 
@@ -11605,6 +11717,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -11640,6 +11753,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -11660,6 +11774,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -11680,6 +11795,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -11718,6 +11834,7 @@ mod tests {
                     block_reason: None,
                     launched_by: LaunchedBy::Manual { user: None },
                     action: None,
+                    config: None,
                 })
                 .await
                 .unwrap();
@@ -11748,6 +11865,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .collect();
 
@@ -11798,6 +11916,7 @@ mod tests {
                     block_reason: None,
                     launched_by: LaunchedBy::Manual { user: None },
                     action: None,
+                    config: None,
                 })
                 .await
                 .unwrap();
@@ -11826,6 +11945,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -11866,6 +11986,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -11886,6 +12007,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -12206,6 +12328,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::default(),
                 action: action.map(String::from),
+                config: None,
             };
 
         // p1: a real keyed failure — floors.
@@ -14891,6 +15014,7 @@ mod tests {
                         block_reason: None,
                         launched_by: LaunchedBy::Manual { user: None },
                         action: None,
+                        config: None,
                     })
                     .await
                     .unwrap();
@@ -14913,6 +15037,7 @@ mod tests {
                         block_reason: None,
                         launched_by: LaunchedBy::Manual { user: None },
                         action: None,
+                        config: None,
                     })
                     .await
                     .unwrap();
@@ -14983,6 +15108,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -15082,6 +15208,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -15310,6 +15437,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -15378,6 +15506,7 @@ mod tests {
                 block_reason: Some("global limit".into()),
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -15408,6 +15537,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -15643,6 +15773,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         }
     }
 
@@ -16717,6 +16848,7 @@ mod tests {
                     block_reason: None,
                     launched_by: LaunchedBy::Manual { user: None },
                     action: None,
+                    config: None,
                 })
                 .await
                 .unwrap();
@@ -16737,6 +16869,7 @@ mod tests {
                 block_reason: None,
                 launched_by: LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -16821,6 +16954,7 @@ mod tests {
                     block_reason: None,
                     launched_by: LaunchedBy::Manual { user: None },
                     action: None,
+                    config: None,
                 })
                 .await
                 .unwrap();
@@ -16865,6 +16999,7 @@ mod tests {
             block_reason: None,
             launched_by: LaunchedBy::Manual { user: None },
             action: None,
+            config: None,
         };
         // CL-A: 2 success, 1 failure
         for r in [
@@ -16921,6 +17056,7 @@ mod tests {
                     block_reason: None,
                     launched_by: LaunchedBy::Manual { user: None },
                     action: None,
+                    config: None,
                 })
                 .await
                 .unwrap();
@@ -16967,6 +17103,7 @@ mod tests {
             error: None,
             launched_by: LaunchedBy::default(),
             action: None,
+            config: None,
         }
     }
 

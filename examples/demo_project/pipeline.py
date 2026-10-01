@@ -13,12 +13,15 @@ import logging
 import os
 import pickle
 import time
-from datetime import datetime
+from datetime import date, datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any, Literal
 
 import obstore.store
 import pyarrow as pa
 from deltalake import write_deltalake
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from rivers import (
     ActionContext,
     ActionResult,
@@ -45,6 +48,7 @@ from rivers import (
     PartitionMapping,
     PartitionsDefinition,
     PickleIOHandler,
+    Resource,
     RunQueueConfig,
     RunRequest,
     Schedule,
@@ -66,15 +70,89 @@ from rivers import (
 # =============================================================================
 
 
+class CrmApi(Resource):
+    """The CRM the ingestion reads from; a launch can point it elsewhere."""
+
+    base_url: str = "https://crm.example.com"
+    timeout_s: int = 10
+    api_key: SecretStr = SecretStr("demo-key")
+
+
 class _IngestionSettings(BaseModel):
     source_system: str = "demo"
     batch_size: int = 100
     include_inactive: bool = False
+    mode: Literal["incremental", "full"] = "incremental"
+
+    @field_validator("source_system")
+    @classmethod
+    def _lowercase(cls, value: str) -> str:
+        if value != value.lower():
+            raise ValueError("source_system must be lowercase")
+        return value
 
 
 class _AnalyticsSettings(BaseModel):
     revenue_threshold: float = 50.0
     top_n_products: int = 5
+
+
+class Region(str, Enum):
+    EU = "eu"
+    US = "us"
+
+
+class Endpoint(BaseModel):
+    host: str = "localhost"
+    port: int = Field(5432, ge=1, le=65535)
+
+
+class Credentials(BaseModel):
+    user: str
+    password: SecretStr = SecretStr("")
+
+
+class _ConfigShowcase(BaseModel):
+    """One field per type the launch dialog's config editor handles."""
+
+    # Scalars, with the bounds the editor checks while typing
+    name: str = Field("showcase", min_length=1, max_length=16)
+    batch_size: int = Field(100, ge=1, le=10_000)
+    threshold: float = Field(0.5, gt=0, lt=1)
+    step: float = Field(0.25, multiple_of=0.05)
+    dry_run: bool = False
+    # Choices: a Literal, a single-value Literal and an Enum
+    mode: Literal["fast", "slow"] = "fast"
+    kind: Literal["showcase"] = "showcase"
+    region: Region = Region.EU
+    # Optionals and unions
+    comment: str | None = None
+    ratio: int | float = 1
+    # Nested models: one optional, one with a required field
+    endpoint: Endpoint = Endpoint()
+    fallback: Endpoint | None = None
+    credentials: Credentials | None = None
+    # Lists, tuples and dicts
+    tags: list[str] = Field(["demo"], max_length=3)
+    window: tuple[int, str] = (7, "days")
+    weights: dict[str, float] = {"orders": 1.0}
+    extra: dict[str, Any] = {}
+    # A secret is never pre-filled
+    api_key: SecretStr = SecretStr("demo-key")
+    # Formats, patterns and validators are checked by the code location
+    since: datetime = datetime(2025, 1, 1)
+    day: date = date(2025, 1, 1)
+    output_dir: Path = Path("/tmp/showcase")
+    version: str = Field("1.0.0", pattern=r"^\d+\.\d+\.\d+$")
+    # No default: the launch is refused until it is set
+    run_label: str
+
+    @field_validator("tags")
+    @classmethod
+    def _unique(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("tags must be unique")
+        return value
 
 
 # =============================================================================
@@ -129,9 +207,7 @@ else:
     raw_io = VersionedPickleIOHandler(store=_local_store, prefix="raw")
     processed_io = VersionedPickleIOHandler(store=_local_store, prefix="processed")
     output_io = VersionedPickleIOHandler(store=_local_store, prefix="output")
-    delta_io = DeltaIOHandler(
-        table_uri=os.path.join(_io_root, "delta"), mode="append"
-    )
+    delta_io = DeltaIOHandler(table_uri=os.path.join(_io_root, "delta"), mode="append")
 
 
 # =============================================================================
@@ -198,9 +274,10 @@ external_weather_data = Asset.external(
     hooks=[log_success, alert_failure],
     pool="database",
 )
-def raw_users() -> dict:
-    """Simulate raw user data ingestion using pipeline config."""
-    settings = _IngestionSettings()
+def raw_users(context: AssetExecutionContext[_IngestionSettings], crm: CrmApi) -> dict:
+    """Simulate raw user data ingestion using pipeline config and the CRM resource."""
+    settings = context.config
+    context.add_output_metadata({"crm": f"{crm.base_url} ({crm.timeout_s}s)"})
     users = [
         {"id": 1, "name": "Alice", "region": "us-east", "active": True, "tier": "pro"},
         {"id": 2, "name": "Bob", "region": "us-west", "active": True, "tier": "free"},
@@ -223,7 +300,7 @@ def raw_users() -> dict:
     ]
     if not settings.include_inactive:
         users = [u for u in users if u["active"]]
-    return {"users": users, "source": settings.source_system}
+    return {"users": users, "source": settings.source_system, "mode": settings.mode}
 
 
 @Asset(
@@ -1172,6 +1249,29 @@ def metadata_showcase(context: AssetExecutionContext) -> dict:
 
 
 # =============================================================================
+# Config Showcase (one field per type the launch dialog's config editor handles)
+# =============================================================================
+
+
+@Asset(
+    io_handler=output_io,
+    tags=["demo", "config"],
+    kinds="showcase",
+    group="demo",
+    code_version="1.0",
+    metadata={"purpose": "Test of every field type in the config editor"},
+)
+def config_showcase(context: AssetExecutionContext[_ConfigShowcase]) -> dict:
+    """Asset whose config has one field per type the config editor handles.
+    The values the launch resolved to are its output metadata."""
+    values = context.config.model_dump(mode="json")
+    context.add_output_metadata(
+        {"config": MetadataValue.json(json.dumps(values, indent=2))}
+    )
+    return values
+
+
+# =============================================================================
 # Failure Showcase (always fails, so the UI has a traceback to show)
 # =============================================================================
 
@@ -1768,6 +1868,8 @@ all_assets = [
     slow_step_d,
     # Metadata showcase
     metadata_showcase,
+    # Config showcase
+    config_showcase,
     # Failure showcase
     broken_pricing_rules,
     # Actions demo (class form)
@@ -1817,6 +1919,7 @@ repo = CodeRepository(
         failure_showcase_schedule,
     ],
     sensors=[new_data_sensor, file_watcher_sensor, data_quality_sensor],
+    resources={"crm": CrmApi()},
     run_queue=RunQueueConfig(
         max_concurrent_runs=3,
         tag_concurrency_limits=[

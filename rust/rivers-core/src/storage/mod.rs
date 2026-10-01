@@ -794,6 +794,13 @@ pub struct RunRecord {
     /// The verb this run executes. `None` means materialize (rows predate actions).
     #[serde(default)]
     pub action: Option<String>,
+    /// The launch document the run was launched with, as JSON text:
+    /// `{"assets": {...}, "resources": {...}, "execution": {...}}` (see the
+    /// `run_config` module of the Python crate). `None` means the definitions
+    /// as they are. Every launcher that starts from a stored run (run queue,
+    /// `rivers execute`, backfill children, reruns) reads it here.
+    #[serde(default)]
+    pub config: Option<String>,
 }
 
 impl RunRecord {
@@ -837,6 +844,9 @@ pub struct CoordinatorRunInfo {
     /// See [`RunRecord::action`] — the backend must execute this verb, not materialize.
     #[serde(default)]
     pub action: Option<String>,
+    /// See [`RunRecord::config`] — the backend applies this document.
+    #[serde(default)]
+    pub config: Option<String>,
 }
 
 impl crate::concurrency::Tagged for CoordinatorRunInfo {
@@ -1072,6 +1082,10 @@ pub struct BackfillRecord {
     /// The verb child runs execute. `None` means materialize.
     #[serde(default)]
     pub action: Option<String>,
+    /// The launch document every child run is launched with; see
+    /// [`RunRecord::config`].
+    #[serde(default)]
+    pub config: Option<String>,
 }
 
 // ── Concurrency pool records ──

@@ -11,12 +11,14 @@ use crate::gil_threads::GilThreads;
 use crate::partitions::PyPartitionKey;
 use crate::repository::{PyBackfillResult, PyCodeRepository, RepoHandle, priority_from_tags};
 
-/// Launch a `Started` run on a fresh OS thread.
+/// Launch a `Started` run on a fresh OS thread. `config` is the record's
+/// stored launch document.
 pub(crate) fn launch_started_run(
     handle: RepoHandle,
     job_name: String,
     partition_key: Option<PyPartitionKey>,
     run_id: String,
+    config: Option<String>,
     gil_threads: &GilThreads,
 ) {
     gil_threads.spawn(move || {
@@ -34,10 +36,10 @@ pub(crate) fn launch_started_run(
                     return;
                 }
             };
-            if let Err(e) =
+            let launched =
                 job.borrow(py)
-                    .execute_run(py, &run_id, partition_key, None, false, true)
-            {
+                    .execute_stored_run(py, &run_id, partition_key, config, false, true);
+            if let Err(e) = launched {
                 tracing::error!(
                     target: "rivers::executor",
                     job = %job_name,
@@ -175,6 +177,7 @@ impl DirectRunDispatcher {
                     req.launched_by.clone(),
                     req.run_id.clone(),
                     req.action.clone(),
+                    req.config.clone(),
                 )
                 .await
             {
@@ -190,6 +193,7 @@ impl DirectRunDispatcher {
             let py_pk = req.partition_key.as_ref().map(PyPartitionKey::from);
             let launched_by = req.launched_by.clone();
             let action = req.action.clone();
+            let config = req.config.clone();
             self.gil_threads.spawn(move || {
                 let result = match action {
                     Some(action) => repo
@@ -200,7 +204,7 @@ impl DirectRunDispatcher {
                             py_pk,
                             None,
                             false,
-                            None,
+                            config,
                             Some(run_id.clone()),
                             false,
                             launched_by,
@@ -213,7 +217,7 @@ impl DirectRunDispatcher {
                             py_pk,
                             None,
                             false,
-                            None,
+                            config,
                             Some(run_id.clone()),
                             false,
                             false,
@@ -263,7 +267,13 @@ impl DirectRunDispatcher {
 
             match self
                 .handle
-                .create_started_run(&job_name, py_pk.as_ref(), r.launched_by.clone(), None)
+                .create_started_run(
+                    &job_name,
+                    py_pk.as_ref(),
+                    r.launched_by.clone(),
+                    None,
+                    r.config.clone(),
+                )
                 .await
             {
                 Ok(run_id) => {
@@ -272,6 +282,7 @@ impl DirectRunDispatcher {
                         job_name,
                         py_pk,
                         run_id.clone(),
+                        r.config.clone(),
                         &self.gil_threads,
                     );
                     ids.push(run_id);
@@ -316,6 +327,7 @@ impl QueuedRunDispatcher {
                 block_reason: None,
                 launched_by: req.launched_by.clone(),
                 action: req.action.clone(),
+                config: req.config.clone(),
             };
             if let Err(e) = self.storage.enqueue_run(&run_record).await {
                 errors.push(anyhow!(
@@ -360,6 +372,7 @@ impl QueuedRunDispatcher {
                     None,
                     r.launched_by.clone(),
                     Some(job_name.clone()),
+                    r.config.clone(),
                 )
                 .await
             {
@@ -453,7 +466,7 @@ impl LocalBackfillDispatcher {
                     bf.failure_policy.as_deref().unwrap_or("continue"),
                     bf.max_concurrency,
                     tags,
-                    None,  // config
+                    bf.config.clone(),
                     false, // block=false
                     bf.dry_run,
                     bf.backfill_id.clone(),

@@ -612,6 +612,22 @@ pub fn records_by_key(
     (records, failed)
 }
 
+/// Asset definitions by key from a page's `get_assets_info` value; empty
+/// until it loads or when it failed.
+pub fn definitions_by_key(
+    assets_info: ReadSignal<Option<Result<Vec<crate::types::AssetDefinitionInfo>, ServerFnError>>>,
+) -> Memo<std::collections::HashMap<String, crate::types::AssetDefinitionInfo>> {
+    Memo::new(move |_| {
+        assets_info.with(|info| match info {
+            Some(Ok(infos)) => infos
+                .iter()
+                .map(|i| (i.asset_key.clone(), i.clone()))
+                .collect(),
+            _ => Default::default(),
+        })
+    })
+}
+
 /// The runs list's verb input: empty is any run, `materialize` is runs with no
 /// verb, anything else is runs of exactly that verb.
 pub fn verb_filter_from_input(input: &str) -> crate::types::VerbFilter {
@@ -805,6 +821,7 @@ pub fn job_verb(
         exclusive: false,
         partitioning: partitioning.to_string(),
         description: None,
+        config_schema: None,
     };
     if verb == "observe" {
         return Some(fallback("observe", "optional"));
@@ -1277,6 +1294,8 @@ mod tests {
             code_version: None,
             asset_type: "asset".to_string(),
             actions: vec![],
+            config_schema: None,
+            metadata: Default::default(),
         }
     }
 
@@ -1318,6 +1337,7 @@ mod tests {
                 exclusive: false,
                 partitioning: "required".to_string(),
                 description: None,
+                config_schema: None,
             })
             .collect();
         info
@@ -1336,6 +1356,7 @@ mod tests {
             exclusive: true,
             partitioning: partitioning.to_string(),
             description: None,
+            config_schema: None,
         }];
         info
     }

@@ -44,6 +44,7 @@ impl RunBackend for LocalRunBackend {
         let node_names = run_info.node_names.clone();
         let partition_key = run_info.partition_key.as_ref().map(PyPartitionKey::from);
         let action = run_info.action.clone();
+        let config = run_info.config.clone();
 
         let run_id_for_key = run_id.clone();
         let done = Arc::new(AtomicBool::new(false));
@@ -62,7 +63,7 @@ impl RunBackend for LocalRunBackend {
                         partition_key,
                         None,
                         false,
-                        None,
+                        config,
                         Some(run_id.clone()),
                         false,
                         LaunchedBy::Manual { user: None },
@@ -75,7 +76,7 @@ impl RunBackend for LocalRunBackend {
                         partition_key,
                         None,
                         false,
-                        None,
+                        config,
                         Some(run_id.clone()),
                         false,
                         false,

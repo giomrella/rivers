@@ -8,12 +8,12 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
 use crate::components::execute_job_dialog::ExecuteJobDialog;
-use crate::components::icons::IconPlay;
+use crate::components::icons::{IconPlay, IconTrash};
 use crate::components::live::{LiveStatusChip, use_live_kick};
 use crate::components::pagination::Pagination;
 use crate::components::ui_kit::{
     AssetSummaryRow, Crumb, EmptyState, KindBadge, RecentRunsStrip, RunsGrid, SectionHeader,
-    StatusChip, StripRun, Topbar,
+    SplitButton, StatusChip, StripRun, Topbar,
 };
 use crate::helpers::{
     JobPartitionPicker, job_partition_picker, job_verb, replay_click, run_status_kind,
@@ -93,6 +93,8 @@ pub fn JobDetailPage() -> impl IntoView {
     let (exec_pending, set_exec_pending) = signal(false);
     let (exec_error, set_exec_error) = signal::<Option<String>>(None);
     let show_dialog = RwSignal::new(false);
+    let launch_resources =
+        crate::components::config_editor::use_launch_resources(loc, show_dialog.into());
     let navigate = leptos_router::hooks::use_navigate();
 
     // The job, resolved against its assets' declarations: the verb it runs
@@ -100,6 +102,19 @@ pub fn JobDetailPage() -> impl IntoView {
     // job's definition has loaded: with no verb to show, Execute waits.
     let jobs_value = crate::helpers::resource_value(jobs);
     let assets_info_value = crate::helpers::resource_value(assets_info);
+    // The dialog's config editor reads the job's assets and their schemas.
+    let job_assets = Signal::derive(move || {
+        let current = name();
+        jobs_value
+            .get()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|j| j.name == current)
+            .map(|j| j.asset_selection)
+            .unwrap_or_default()
+    });
+    let asset_info_by_key = crate::helpers::definitions_by_key(assets_info_value);
     let job_launch = Memo::new(
         move |_| -> Option<(Option<AssetActionInfo>, JobPartitionPicker)> {
             let current = name();
@@ -128,16 +143,35 @@ pub fn JobDetailPage() -> impl IntoView {
             .map_or(JobPartitionPicker::None, |(_, picker)| picker)
     });
     let job_verb_signal = Signal::derive(move || job_launch.get().and_then(|(verb, _)| verb));
+    // The dialog picks partitions and edits config; a job needing neither
+    // runs on the click.
+    let job_opens_dialog = Signal::derive(move || {
+        !matches!(job_picker.get(), JobPartitionPicker::None)
+            || asset_info_by_key.with(|defs| {
+                crate::components::config_editor::launch_takes_config(
+                    &job_assets.get(),
+                    defs,
+                    job_verb_signal.get().as_ref().map(|v| v.name.as_str()),
+                )
+            })
+    });
     let job_loaded = Signal::derive(move || job_launch.get().is_some());
     let exec_armed = use_confirm_armed(move || params.track());
 
     let dialog_job_name: Signal<String> = Signal::derive(name);
+    let execute_variant = Signal::derive(move || {
+        if job_verb_signal.get().is_some_and(|v| v.is_destructive()) {
+            "btn-danger"
+        } else {
+            "btn-primary"
+        }
+    });
 
     let on_execute = move |_| {
-        let Some((verb, picker)) = job_launch.get() else {
+        let Some((verb, _)) = job_launch.get() else {
             return;
         };
-        if !matches!(picker, JobPartitionPicker::None) {
+        if job_opens_dialog.get() {
             set_exec_error.set(None);
             show_dialog.set(true);
             return;
@@ -158,7 +192,7 @@ pub fn JobDetailPage() -> impl IntoView {
         leptos::task::spawn_local(async move {
             let path_ns = ns.clone();
             let path_name = lname.clone();
-            match execute_job(ns, lname, job_name, shown, None, false).await {
+            match execute_job(ns, lname, job_name, shown, None, false, None).await {
                 Ok(result) if !result.run_id.is_empty() => {
                     let path = loc_path(&path_ns, &path_name, &format!("runs/{}", result.run_id));
                     navigate(&path, Default::default());
@@ -197,29 +231,55 @@ pub fn JobDetailPage() -> impl IntoView {
                 on_refresh=Callback::new(move |_| set_refresh_tick.update(|t| *t += 1))
             />
             {move || exec_error.get().map(|msg| view! { <span class="text-error">{msg}</span> })}
-            <button
-                class=move || if job_verb_signal.get().is_some_and(|v| v.is_destructive()) {
-                    "btn btn-danger"
+            // A job that runs on the click offers the dialog from its menu,
+            // for the launch document (metadata, resources, executor).
+            {move || {
+                let on_execute = on_execute.clone();
+                let execute = view! {
+                    <button
+                        class=move || format!("btn {}", execute_variant.get())
+                        on:click=on_execute
+                        disabled=move || exec_pending.get() || !job_loaded.get()
+                    >
+                        {move || if job_verb_signal.get().is_some_and(|v| v.is_destructive()) {
+                            view! { <IconTrash/> }.into_any()
+                        } else {
+                            view! { <IconPlay/> }.into_any()
+                        }}
+                        {move || if exec_pending.get() {
+                            "Executing…".to_string()
+                        } else if exec_armed.get() {
+                            format!(
+                                "Confirm {}?",
+                                job_verb_signal.get().map(|v| v.name).unwrap_or_default()
+                            )
+                        } else if job_opens_dialog.get() {
+                            "Execute…".to_string()
+                        } else {
+                            "Execute".to_string()
+                        }}
+                    </button>
+                };
+                if job_loaded.get() && !job_opens_dialog.get() {
+                    view! {
+                        <SplitButton
+                            variant=execute_variant
+                            disabled=Signal::derive(move || exec_pending.get())
+                            menu_label="Execute with config…"
+                            on_menu=Callback::new(move |()| {
+                                exec_armed.set(false);
+                                set_exec_error.set(None);
+                                show_dialog.set(true);
+                            })
+                        >
+                            {execute}
+                        </SplitButton>
+                    }
+                    .into_any()
                 } else {
-                    "btn btn-primary"
+                    execute.into_any()
                 }
-                on:click=on_execute
-                disabled=move || exec_pending.get() || !job_loaded.get()
-            >
-                <IconPlay/>
-                {move || if exec_pending.get() {
-                    "Executing…".to_string()
-                } else if exec_armed.get() {
-                    format!(
-                        "Confirm {}?",
-                        job_verb_signal.get().map(|v| v.name).unwrap_or_default()
-                    )
-                } else if matches!(job_picker.get(), JobPartitionPicker::None) {
-                    "Execute".to_string()
-                } else {
-                    "Execute…".to_string()
-                }}
-            </button>
+            }}
         </Topbar>
 
         <ExecuteJobDialog
@@ -227,6 +287,9 @@ pub fn JobDetailPage() -> impl IntoView {
             job_name=dialog_job_name
             picker=job_picker
             verb=job_verb_signal
+            assets=job_assets
+            definitions=asset_info_by_key
+            resources=launch_resources
         />
 
         <Transition fallback=move || view! { <div class="loading">"Loading…"</div> }>

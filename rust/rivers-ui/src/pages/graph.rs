@@ -286,19 +286,13 @@ pub fn GraphPage() -> impl IntoView {
     // Materialize always routes through the dialog so the user previews the
     // asset list (and partition keys) before anything launches.
     let assets_info_value = crate::helpers::resource_value(assets_info);
-    let asset_info_by_key = Memo::new(move |_| {
-        assets_info_value
-            .get()
-            .and_then(|r| r.ok())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|i| (i.asset_key.clone(), i))
-            .collect::<std::collections::HashMap<String, crate::types::AssetDefinitionInfo>>()
-    });
+    let asset_info_by_key = crate::helpers::definitions_by_key(assets_info_value);
     // The dialog's row decoration, from the page's own live resource.
     let (records_by_key, records_failed) = crate::helpers::records_by_key(all_assets);
     let (mat_targets, set_mat_targets) = signal(Vec::<String>::new());
     let show_dialog = RwSignal::new(false);
+    let launch_resources =
+        crate::components::config_editor::use_launch_resources(loc, show_dialog.into());
     let dialog_verb = RwSignal::new(Option::<crate::types::AssetActionInfo>::None);
     let dialog_destructive = RwSignal::new(false);
     let materialize_picker = Signal::derive(move || {
@@ -979,6 +973,8 @@ pub fn GraphPage() -> impl IntoView {
             destructive=dialog_destructive
             records=records_by_key
             records_failed=records_failed
+            definitions=asset_info_by_key
+            resources=launch_resources
         />
     }
 }

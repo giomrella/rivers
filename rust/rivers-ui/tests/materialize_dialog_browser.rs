@@ -504,6 +504,7 @@ async fn optional_key_verb_blocks_a_partial_multi_pick() {
                             exclusive: true,
                             partitioning: "optional".to_string(),
                             description: None,
+                            config_schema: None,
                         })
                     })
                     destructive=Signal::derive(|| true)
@@ -558,6 +559,7 @@ async fn optional_key_verb_needs_a_partition_or_the_whole_asset() {
                             exclusive: true,
                             partitioning: "optional".to_string(),
                             description: None,
+                            config_schema: None,
                         })
                     })
                     destructive=Signal::derive(|| true)
@@ -618,6 +620,7 @@ async fn destructive_verb_is_named_and_flagged() {
                             exclusive: true,
                             partitioning: "optional".to_string(),
                             description: None,
+                            config_schema: None,
                         })
                     })
                     destructive=Signal::derive(|| true)
@@ -678,6 +681,7 @@ async fn back_to_another_code_location_closes_the_dialog() {
                                             exclusive: true,
                                             partitioning: "optional".to_string(),
                                             description: None,
+                                            config_schema: None,
                                         })
                                     })
                                     destructive=Signal::derive(|| true)
@@ -737,4 +741,295 @@ async fn back_to_another_code_location_closes_the_dialog() {
     assert_eq!(request_bodies(&sent).await, Vec::<String>::new());
     assert!(!show.get_untracked(), "the dialog stayed open on prod");
     assert!(query_all(&host, ".modal-overlay").is_empty());
+}
+
+// ── Config editor ──
+
+const PIPELINE_SCHEMA: &str = r#"{"properties":{"api_key":{"title":"Api Key","type":"string"},"batch_size":{"default":100,"title":"Batch Size","type":"integer"}},"required":["api_key"],"title":"PipelineConfig","type":"object","x-settings":true}"#;
+
+fn definition(key: &str, config_schema: Option<&str>) -> rivers_ui::types::AssetDefinitionInfo {
+    rivers_ui::types::AssetDefinitionInfo {
+        asset_key: key.to_string(),
+        description: None,
+        partition_def: None,
+        hooks: vec![],
+        io_handler: None,
+        has_self_dependency: false,
+        is_external: false,
+        automation_condition: None,
+        tags: vec![],
+        kinds: vec![],
+        group: None,
+        code_version: None,
+        asset_type: "asset".to_string(),
+        actions: vec![],
+        config_schema: config_schema.map(str::to_string),
+        metadata: Default::default(),
+    }
+}
+
+fn mount_with_definitions(
+    show: RwSignal<bool>,
+    definitions: Vec<rivers_ui::types::AssetDefinitionInfo>,
+) -> web_sys::HtmlElement {
+    nav_to("/locations/default/demo");
+    let target = fresh_mount_target();
+    let keys: Vec<String> = definitions.iter().map(|d| d.asset_key.clone()).collect();
+    let by_key: HashMap<String, rivers_ui::types::AssetDefinitionInfo> = definitions
+        .into_iter()
+        .map(|d| (d.asset_key.clone(), d))
+        .collect();
+    mount_to(target.clone(), move || {
+        let keys = keys.clone();
+        let by_key = by_key.clone();
+        view! {
+            <Router>
+                <MaterializeDialog
+                    show=show
+                    asset_keys=Signal::derive(move || keys.clone())
+                    records=Signal::derive(HashMap::new)
+                    definitions=Signal::derive(move || by_key.clone())
+                />
+            </Router>
+        }
+    })
+    .forget();
+    target
+}
+
+/// Type `value` into the editor: set the value and fire `input`, as a user does.
+fn type_config(host: &web_sys::HtmlElement, value: &str) {
+    let textarea = query_one(host, ".config-editor-text");
+    js_sys::Reflect::set(&textarea, &"value".into(), &value.into()).unwrap();
+    let init = web_sys::EventInit::new();
+    init.set_bubbles(true);
+    textarea
+        .dispatch_event(&web_sys::Event::new_with_event_init_dict("input", &init).unwrap())
+        .unwrap();
+}
+
+fn editor_value(host: &web_sys::HtmlElement) -> String {
+    js_sys::Reflect::get(&query_one(host, ".config-editor-text"), &"value".into())
+        .unwrap()
+        .as_string()
+        .unwrap_or_default()
+}
+
+fn submit_disabled(host: &web_sys::HtmlElement) -> bool {
+    js_sys::Reflect::get(
+        &query_one(host, ".modal-footer .btn-primary"),
+        &"disabled".into(),
+    )
+    .unwrap()
+    .as_bool()
+    .unwrap_or(false)
+}
+
+/// An asset without config still gets the editor: the document's
+/// `execution` section applies to any launch, and metadata can be added.
+#[wasm_bindgen_test]
+async fn config_editor_offers_execution_for_a_plain_asset() {
+    let show = RwSignal::new(true);
+    let host = mount_with_definitions(show, vec![definition("plain", None)]);
+    flush_effects().await;
+
+    assert_eq!(editor_value(&host), "{\n  \"execution\": {}\n}");
+    assert!(!submit_disabled(&host));
+    type_config(&host, "{\"execution\": {\"max_workers\": 2}}");
+    flush_effects().await;
+    assert_eq!(
+        query_one(&host, ".code-editor-issue")
+            .text_content()
+            .unwrap_or_default(),
+        "1:16 execution: max_workers needs \"executor\": \"parallel\""
+    );
+    assert!(submit_disabled(&host));
+}
+
+/// The editor opens on the launch document with each configured asset's
+/// defaults. A field without a default is hinted as required but never
+/// pre-filled, so nothing is sent for it unless typed.
+#[wasm_bindgen_test]
+async fn config_editor_prefills_defaults_and_hints_required_fields() {
+    let show = RwSignal::new(true);
+    let host = mount_with_definitions(
+        show,
+        vec![
+            definition("plain", None),
+            definition("api_data", Some(PIPELINE_SCHEMA)),
+        ],
+    );
+    flush_effects().await;
+
+    assert_eq!(
+        editor_value(&host),
+        "{\n  \"assets\": {\n    \"api_data\": {\n      \"config\": {\n        \"batch_size\": 100\n      }\n    }\n  },\n  \"execution\": {}\n}"
+    );
+    assert_eq!(
+        query_one(&host, ".config-editor-hint-fields")
+            .text_content()
+            .unwrap_or_default(),
+        "assets.api_data.config.api_key"
+    );
+    assert!(query_all(&host, ".config-field").is_empty());
+    assert!(!submit_disabled(&host));
+}
+
+/// Malformed text blocks the submit with the reason; Reset restores the
+/// defaults and unblocks it.
+#[wasm_bindgen_test]
+async fn invalid_config_blocks_submit_until_reset() {
+    let show = RwSignal::new(true);
+    let host = mount_with_definitions(show, vec![definition("api_data", Some(PIPELINE_SCHEMA))]);
+    flush_effects().await;
+
+    type_config(&host, "{\"assets\": ");
+    flush_effects().await;
+    let error = query_one(&host, ".code-editor-issue")
+        .text_content()
+        .unwrap_or_default();
+    assert_eq!(error, "1:12 Expected a value");
+    assert!(!query_all(&host, ".code-editor-mark").is_empty());
+    assert!(submit_disabled(&host));
+
+    type_config(&host, "{\"other\": {\"x\": 1}}");
+    flush_effects().await;
+    assert_eq!(
+        query_one(&host, ".code-editor-issue")
+            .text_content()
+            .unwrap_or_default(),
+        "1:2 unknown field 'other'; expected one of assets, execution"
+    );
+    assert!(submit_disabled(&host));
+
+    click(&query_one(&host, ".config-editor .link-btn"), false);
+    flush_effects().await;
+    assert!(query_all(&host, ".code-editor-issue").is_empty());
+    assert_eq!(
+        editor_value(&host),
+        "{\n  \"assets\": {\n    \"api_data\": {\n      \"config\": {\n        \"batch_size\": 100\n      }\n    }\n  },\n  \"execution\": {}\n}"
+    );
+    assert!(!submit_disabled(&host));
+}
+
+const STRICT_SCHEMA: &str = r#"{"properties":{"token":{"title":"Token","type":"string"},"limit":{"default":1,"title":"Limit","type":"integer"}},"required":["token"],"title":"StrictConfig","type":"object"}"#;
+
+/// A field a plain model needs and the document leaves unset blocks the
+/// submit; the hint's button sets it. (`api_key` above is a settings
+/// field the environment may set, so it only hints.)
+#[wasm_bindgen_test]
+async fn a_plain_models_required_field_blocks_submit_until_set() {
+    let show = RwSignal::new(true);
+    let host = mount_with_definitions(show, vec![definition("strict", Some(STRICT_SCHEMA))]);
+    flush_effects().await;
+
+    assert_eq!(
+        query_one(&host, ".code-editor-issue")
+            .text_content()
+            .unwrap_or_default(),
+        "4:17 assets.strict.config.token: required"
+    );
+    assert!(submit_disabled(&host));
+
+    click(&query_one(&host, ".config-editor-hint .link-btn"), false);
+    flush_effects().await;
+    assert!(query_all(&host, ".code-editor-issue").is_empty());
+    assert!(!submit_disabled(&host));
+    let value: serde_json::Value = serde_json::from_str(&editor_value(&host)).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "assets": {"strict": {"config": {"limit": 1, "token": ""}}},
+            "execution": {}
+        })
+    );
+}
+
+/// The repository's resources come pre-filled with their current values;
+/// the schema underlines a wrong value under a key.
+#[wasm_bindgen_test]
+async fn config_editor_prefills_resource_values() {
+    nav_to("/locations/default/demo");
+    let target = fresh_mount_target();
+    let show = RwSignal::new(true);
+    let definitions: HashMap<String, rivers_ui::types::AssetDefinitionInfo> = [(
+        "api_data".to_string(),
+        definition("api_data", Some(PIPELINE_SCHEMA)),
+    )]
+    .into_iter()
+    .collect();
+    let resources = vec![rivers_ui::types::ResourceInfo {
+        key: "db".to_string(),
+        config_schema: r#"{"properties":{"pool_size":{"default":2,"type":"integer"}},"title":"Db","type":"object"}"#.to_string(),
+    }];
+    mount_to(target.clone(), move || {
+        let definitions = definitions.clone();
+        let resources = resources.clone();
+        view! {
+            <Router>
+                <MaterializeDialog
+                    show=show
+                    asset_keys=Signal::derive(|| vec!["api_data".to_string()])
+                    records=Signal::derive(HashMap::new)
+                    definitions=Signal::derive(move || definitions.clone())
+                    resources=Signal::derive(move || resources.clone())
+                />
+            </Router>
+        }
+    })
+    .forget();
+    flush_effects().await;
+
+    assert!(
+        editor_value(&target)
+            .ends_with(
+                "  \"execution\": {},\n  \"resources\": {\n    \"db\": {\n      \"pool_size\": 2\n    }\n  }\n}"
+            ),
+        "{}",
+        editor_value(&target)
+    );
+    type_config(
+        &target,
+        "{\"resources\": {\"db\": {\"pool_size\": \"many\"}}}",
+    );
+    flush_effects().await;
+    assert_eq!(
+        query_one(&target, ".code-editor-issue")
+            .text_content()
+            .unwrap_or_default(),
+        "1:36 resources.db.pool_size: expected integer, got string"
+    );
+    assert!(submit_disabled(&target));
+}
+
+/// Unchecking the only configured asset leaves the editor with the
+/// document's `execution` section; checking it again brings the defaults
+/// back (the user had not typed).
+#[wasm_bindgen_test]
+async fn config_editor_follows_the_checked_assets() {
+    let show = RwSignal::new(true);
+    let host = mount_with_definitions(
+        show,
+        vec![
+            definition("plain", None),
+            definition("api_data", Some(PIPELINE_SCHEMA)),
+        ],
+    );
+    flush_effects().await;
+    assert_eq!(query_all(&host, ".config-editor").len(), 1);
+
+    let checkboxes = query_all(&host, ".mat-dialog-asset-list .asset-row-check");
+    set_checked(&checkboxes[1], false);
+    flush_effects().await;
+    assert_eq!(editor_value(&host), "{\n  \"execution\": {}\n}");
+
+    set_checked(&checkboxes[1], true);
+    // The template effect runs after the Show has mounted the textarea, so
+    // the value binding follows one microtask later.
+    flush_effects().await;
+    flush_effects().await;
+    assert_eq!(
+        editor_value(&host),
+        "{\n  \"assets\": {\n    \"api_data\": {\n      \"config\": {\n        \"batch_size\": 100\n      }\n    }\n  },\n  \"execution\": {}\n}"
+    );
 }

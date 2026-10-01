@@ -222,6 +222,7 @@ class CodeRepository:
         selection: list[str] | None = None,
         partition_key: PartitionKey | None = None,
         job_name: str | None = None,
+        config: dict[str, Any] | None = None,
     ) -> "RunHandle":
         """(Internal) submit a run to the queue and return a handle."""
         ...
@@ -276,7 +277,7 @@ class CodeRepository:
         partition_key: PartitionKey | None = None,
         tags: list[tuple[str, str]] | None = None,
         raise_on_error: bool = True,
-        config: dict[str, dict[str, Any]] | None = None,
+        config: dict[str, Any] | None = None,
         run_id_override: str | None = None,
         include_upstream: bool = False,
         resume: bool = False,
@@ -289,7 +290,10 @@ class CodeRepository:
             partition_key: Partition to target (required for partitioned assets).
             tags: Run tags applied for queue / observability filtering.
             raise_on_error: Raise on first failure instead of returning a failed result.
-            config: Per-asset config, keyed by asset name.
+            config: The launch document: ``{"assets": {name: {"config":
+                {...}, "metadata": {...}}}, "resources": {key: {...}},
+                "execution": {"executor": ..., "max_workers": ...}}``. Values
+                must be JSON-serializable; the run record keeps it.
             run_id_override: Use a pre-assigned run ID (for K8s execution pods).
             include_upstream: Also materialize transitive deps (default: only ``selection``).
             resume: Skip already-completed steps from a crashed prior run with the same ID.
@@ -308,7 +312,7 @@ class CodeRepository:
         failure_policy: str = "continue",
         max_concurrency: int = 4,
         tags: list[tuple[str, str]] | None = None,
-        config: dict[str, dict[str, Any]] | None = None,
+        config: dict[str, Any] | None = None,
         block: bool = True,
         dry_run: bool = False,
         action: str | None = None,
@@ -323,18 +327,13 @@ class CodeRepository:
             failure_policy: ``"continue"`` or ``"stop_on_failure"``.
             max_concurrency: Cap on concurrent partition runs.
             tags: Run tags applied to every spawned run.
-            config: Per-asset config, keyed by asset name. Needs ``block=True``.
+            config: The launch document (see :meth:`materialize`). Kept on the
+                backfill record and applied to every child run.
             block: Wait for the backfill to finish before returning. ``False``
-                only records the backfill for a daemon to run later, and
-                raises if ``config`` is given.
+                only records the backfill for a daemon to run later.
             dry_run: Plan only — return the would-be run shape without launching.
             action: Verb child runs execute; ``None`` means materialize.
                 Every selected asset must define the action.
-
-        Raises:
-            ExecutionError: ``config`` is given with ``block=False``, also for a
-                dry run. The backfill record does not keep config, so the runs
-                would use the config defaults.
         """
         ...
 
@@ -436,7 +435,7 @@ class CodeRepository:
         partition_key: PartitionKey | None = None,
         tags: list[tuple[str, str]] | None = None,
         raise_on_error: bool = True,
-        config: dict[str, dict[str, Any]] | None = None,
+        config: dict[str, Any] | None = None,
         run_id_override: str | None = None,
         resume: bool = False,
     ) -> RunResult:
@@ -452,7 +451,8 @@ class CodeRepository:
             partition_key: Partition to act on, like ``materialize``.
             tags: Run tags.
             raise_on_error: Raise the first failure instead of reporting it.
-            config: Per-asset config, keyed by asset name.
+            config: The launch document (see :meth:`materialize`); ``config``
+                overrides go to the action's own config class.
             run_id_override: Re-execute an existing run record under its
                 original id (K8s run pods); a fresh id is minted otherwise.
             resume: Skip steps this run already completed, so a crashed action

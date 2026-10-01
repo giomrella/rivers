@@ -5,13 +5,16 @@
 //! itself lives in [`PartitionPicker`]; this dialog only owns the
 //! action dispatch + post-success navigation.
 
+use std::collections::HashMap;
+
 use leptos::prelude::*;
 
+use crate::components::config_editor::{ConfigEditor, use_launch_config};
 use crate::components::partition_picker::{PartitionPicker, WholeAssetChoice};
 use crate::helpers::{JobPartitionPicker, close_on_navigation};
 use crate::loc::{loc_path, use_current_location};
 use crate::server_fns::mutations::{execute_job, launch_backfill};
-use crate::types::{AssetActionInfo, SubmitPartitionKey};
+use crate::types::{AssetActionInfo, AssetDefinitionInfo, ResourceInfo, SubmitPartitionKey};
 
 /// Above this many selected partitions, submit one job-aware backfill instead of
 /// a run each (mirrors `MaterializeDialog`).
@@ -36,6 +39,13 @@ pub fn ExecuteJobDialog(
     /// explicit whole-asset choice (one keyless run); a destructive one says so.
     #[prop(optional, into)]
     verb: Option<Signal<Option<AssetActionInfo>>>,
+    /// The job's assets and their definitions, for the config editor.
+    #[prop(optional, into)]
+    assets: Option<Signal<Vec<String>>>,
+    #[prop(optional, into)] definitions: Option<Signal<HashMap<String, AssetDefinitionInfo>>>,
+    /// The resources a launch document may override, for the config editor.
+    #[prop(optional, into)]
+    resources: Option<Signal<Vec<ResourceInfo>>>,
 ) -> impl IntoView {
     let verb: Signal<Option<AssetActionInfo>> = verb.unwrap_or_else(|| Signal::derive(|| None));
     let destructive = Memo::new(move |_| verb.get().is_some_and(|v| v.is_destructive()));
@@ -48,47 +58,59 @@ pub fn ExecuteJobDialog(
     let whole_asset_chosen = Memo::new(move |_| whole_asset.get() && key_optional.get());
     let error = RwSignal::new(None::<String>);
     let nav_to = RwSignal::new(None::<String>);
-
     let loc = use_current_location();
     close_on_navigation(show);
+    // The submit button waits for text without issues, from the schema at
+    // once and from the config classes shortly after.
+    let config = use_launch_config(
+        assets.unwrap_or_else(|| Signal::derive(Vec::new)),
+        definitions.unwrap_or_else(|| Signal::derive(HashMap::new)),
+        resources.unwrap_or_else(|| Signal::derive(Vec::new)),
+        Signal::derive(move || verb.get().map(|v| v.name)),
+        loc,
+    );
+    let config_check = config.check;
 
-    let action = Action::new(move |input: &(Vec<SubmitPartitionKey>, bool)| {
-        let (keys, whole_asset) = input.clone();
-        let job = job_name.get_untracked();
-        // The server refuses a job that no longer runs the verb shown here.
-        let shown = verb.get_untracked().map(|v| v.name);
-        let (ns, name) = loc.get_untracked();
-        async move {
-            if keys.len() > BACKFILL_THRESHOLD {
-                // >2 partitions → one job-aware backfill. `None` selection: the
-                // server resolves the job's assets.
-                let r = launch_backfill(ns, name, None, keys, None, Some(job), shown)
+    let action = Action::new(
+        move |input: &(Vec<SubmitPartitionKey>, bool, Option<String>)| {
+            let (keys, whole_asset, config) = input.clone();
+            let job = job_name.get_untracked();
+            // The server refuses a job that no longer runs the verb shown here.
+            let shown = verb.get_untracked().map(|v| v.name);
+            let (ns, name) = loc.get_untracked();
+            async move {
+                if keys.len() > BACKFILL_THRESHOLD {
+                    // >2 partitions → one job-aware backfill. `None` selection: the
+                    // server resolves the job's assets.
+                    let r = launch_backfill(ns, name, None, keys, None, Some(job), shown, config)
+                        .await
+                        .map_err(|e| crate::helpers::err_text(&e))?;
+                    return Ok::<ExecOutcome, String>(ExecOutcome::Backfill(r.backfill_id));
+                }
+                let key_opts = if keys.is_empty() {
+                    vec![None]
+                } else {
+                    keys.into_iter().map(Some).collect::<Vec<_>>()
+                };
+                let mut last_run_id = String::new();
+                for pk in key_opts {
+                    last_run_id = execute_job(
+                        ns.clone(),
+                        name.clone(),
+                        job.clone(),
+                        shown.clone(),
+                        pk,
+                        whole_asset,
+                        config.clone(),
+                    )
                     .await
-                    .map_err(|e| crate::helpers::err_text(&e))?;
-                return Ok::<ExecOutcome, String>(ExecOutcome::Backfill(r.backfill_id));
+                    .map_err(|e| crate::helpers::err_text(&e))?
+                    .run_id;
+                }
+                Ok(ExecOutcome::Run(last_run_id))
             }
-            let key_opts = if keys.is_empty() {
-                vec![None]
-            } else {
-                keys.into_iter().map(Some).collect::<Vec<_>>()
-            };
-            let mut last_run_id = String::new();
-            for pk in key_opts {
-                last_run_id = execute_job(
-                    ns.clone(),
-                    name.clone(),
-                    job.clone(),
-                    shown.clone(),
-                    pk,
-                    whole_asset,
-                )
-                .await
-                .map_err(|e| crate::helpers::err_text(&e))?
-                .run_id;
-            }
-            Ok(ExecOutcome::Run(last_run_id))
-        }
-    });
+        },
+    );
 
     // Clear leftover error and choice on reopen — selection state is reset
     // by PartitionPicker via its own `reset` prop.
@@ -178,6 +200,12 @@ pub fn ExecuteJobDialog(
                         <Show when=move || !whole_asset_chosen.get()>
                             <PartitionPicker picker=picker selected=selected reset=show/>
                         </Show>
+                        <ConfigEditor
+                            schema=config.schema
+                            text=config.text
+                            reset=show
+                            check=config_check
+                        />
                         {move || error.get().map(|msg| view! {
                             <div class="error-msg">{msg}</div>
                         })}
@@ -199,9 +227,9 @@ pub fn ExecuteJobDialog(
                                     error.set(Some(msg.to_string()));
                                     return;
                                 }
-                                action.dispatch((keys, whole));
+                                action.dispatch((keys, whole, config_check.get_untracked().payload));
                             }
-                            disabled=move || pending.get()
+                            disabled=move || pending.get() || !config_check.get().issues.is_empty()
                         >
                             {move || {
                                 if pending.get() {

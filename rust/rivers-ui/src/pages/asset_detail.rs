@@ -259,12 +259,23 @@ pub fn AssetDetailPage() -> impl IntoView {
         params.track();
         vec![key()]
     });
+    let asset_info_by_key = crate::helpers::definitions_by_key(assets_info_value);
     let show_dialog = RwSignal::new(false);
+    let launch_resources =
+        crate::components::config_editor::use_launch_resources(loc, show_dialog.into());
+    // One click materializes an unpartitioned asset — unless it takes config,
+    // which only the dialog can edit.
+    let materialize_opens_dialog = Signal::derive(move || {
+        !matches!(materialize_picker.get(), JobPartitionPicker::None)
+            || asset_info_by_key.with(|defs| {
+                crate::components::config_editor::launch_takes_config(&[key()], defs, None)
+            })
+    });
 
     let materialize_action = Action::new(move |_: &()| {
         let k = key();
         let (ns, lname) = loc.get_untracked();
-        async move { trigger_materialize(ns, lname, Some(vec![k]), None, None).await }
+        async move { trigger_materialize(ns, lname, Some(vec![k]), None, None, None).await }
     });
     let materialize_pending = materialize_action.pending();
 
@@ -284,6 +295,7 @@ pub fn AssetDetailPage() -> impl IntoView {
                 None,
                 None,
                 false,
+                None,
             )
             .await
         }
@@ -329,7 +341,9 @@ pub fn AssetDetailPage() -> impl IntoView {
                     // dialog it opens says what it does. A keyed verb on a
                     // partitioned asset needs the dialog's partition picker.
                     let destructive = act.is_destructive();
-                    let one_click = !destructive && (!partitioned || act.is_keyless());
+                    let one_click = !destructive
+                        && (!partitioned || act.is_keyless())
+                        && act.config_schema.is_none();
                     let label = if one_click {
                         crate::helpers::verb_label(&verb)
                     } else {
@@ -381,10 +395,10 @@ pub fn AssetDetailPage() -> impl IntoView {
                             on:click=move |_| {
                                 dialog_verb.set(None);
                                 dialog_destructive.set(false);
-                                if matches!(materialize_picker.get(), JobPartitionPicker::None) {
-                                    materialize_action.dispatch(());
-                                } else {
+                                if materialize_opens_dialog.get() {
                                     show_dialog.set(true);
+                                } else {
+                                    materialize_action.dispatch(());
                                 }
                             }
                             disabled=move || materialize_pending.get()
@@ -392,12 +406,29 @@ pub fn AssetDetailPage() -> impl IntoView {
                             <IconPlay/>
                             {move || if materialize_pending.get() {
                                 "Materializing…"
-                            } else if matches!(materialize_picker.get(), JobPartitionPicker::None) {
-                                "Materialize"
-                            } else {
+                            } else if materialize_opens_dialog.get() {
                                 "Materialize…"
+                            } else {
+                                "Materialize"
                             }}
                         </button>
+                        // The one-click launch runs as defined; the dialog
+                        // edits the launch document (metadata, resources,
+                        // executor) for any asset.
+                        <Show when=move || !materialize_opens_dialog.get()>
+                            <button
+                                class="btn"
+                                title="Materialize with a launch document"
+                                on:click=move |_| {
+                                    dialog_verb.set(None);
+                                    dialog_destructive.set(false);
+                                    show_dialog.set(true);
+                                }
+                                disabled=move || materialize_pending.get()
+                            >
+                                "Materialize…"
+                            </button>
+                        </Show>
                     }.into_any()
                 }
             }}
@@ -837,6 +868,8 @@ pub fn AssetDetailPage() -> impl IntoView {
             destructive=dialog_destructive
             records=records_by_key
             records_failed=records_failed
+            definitions=asset_info_by_key
+            resources=launch_resources
         />
     }
 }

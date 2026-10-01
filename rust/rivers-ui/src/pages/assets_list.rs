@@ -269,6 +269,9 @@ pub fn AssetsListPage() -> impl IntoView {
 
     // The selection controls live outside the table's <Transition>.
     let assets_info_value = crate::helpers::resource_value(assets_info);
+    let asset_info_by_key = crate::helpers::definitions_by_key(assets_info_value);
+    let launch_resources =
+        crate::components::config_editor::use_launch_resources(loc, show_dialog.into());
     let materialize_picker = Signal::derive(move || {
         let infos = assets_info_value
             .get()
@@ -650,6 +653,8 @@ pub fn AssetsListPage() -> impl IntoView {
             destructive=dialog_destructive
             records=records_by_key
             records_failed=records_failed
+            definitions=asset_info_by_key
+            resources=launch_resources
         />
     }
 }

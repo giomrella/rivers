@@ -4,7 +4,7 @@
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::types::SubmitPartitionKey;
+use crate::types::{ConfigError, SubmitPartitionKey};
 
 /// Session identity as a proto `UserRef`; `None` in auth mode `none`.
 #[cfg(feature = "ssr")]
@@ -117,8 +117,9 @@ pub struct MaterializeResult {
 
 /// Trigger a materialization run for `selection` (assets) at the given code
 /// location. `partition_key` is required iff every asset in the selection is
-/// partitioned. Fire-and-forget: returns the `run_id` immediately; the
-/// caller polls the run-detail page for completion.
+/// partitioned. `config` is the launch document as JSON, which the backend
+/// validates and stores on the run. Fire-and-forget: returns the
+/// `run_id` immediately; the caller polls the run-detail page for completion.
 #[server]
 pub async fn trigger_materialize(
     loc_ns: String,
@@ -126,6 +127,7 @@ pub async fn trigger_materialize(
     selection: Option<Vec<String>>,
     partition_key: Option<SubmitPartitionKey>,
     tags: Option<Vec<(String, String)>>,
+    config: Option<String>,
 ) -> Result<MaterializeResult, ServerFnError> {
     use rivers_api::rivers::MaterializeRequest;
 
@@ -141,6 +143,7 @@ pub async fn trigger_materialize(
             partition_key: partition_key.map(submit_to_proto),
             tags: tags_to_proto(tags),
             user: current_user_ref().await,
+            config,
         })
         .await
         .map_err(super::grpc_err)?;
@@ -155,6 +158,7 @@ pub async fn trigger_materialize(
 /// Run a named asset action over a selection. Returns the run id.
 /// `whole_asset` is the user's explicit choice to run an Optional-key verb on
 /// every partition; without it the backend rejects a keyless run of one.
+/// `config` is as for [`trigger_materialize`], for the action's config class.
 #[server]
 pub async fn trigger_action(
     loc_ns: String,
@@ -164,6 +168,7 @@ pub async fn trigger_action(
     partition_key: Option<SubmitPartitionKey>,
     tags: Option<Vec<(String, String)>>,
     whole_asset: bool,
+    config: Option<String>,
 ) -> Result<String, ServerFnError> {
     use rivers_api::rivers::RunActionRequest;
 
@@ -191,6 +196,7 @@ pub async fn trigger_action(
             user: current_user_ref().await,
             all_assets: false,
             whole_asset,
+            config,
         })
         .await
         .map_err(super::grpc_err)?;
@@ -206,9 +212,13 @@ pub async fn trigger_action(
 
 /// Re-execute a run by id, server-side: replays it on its original partition,
 /// reusing tags + job/materialization shape, routed to the run's owning code
-/// location. Returns the new `run_id`.
+/// location. Returns the new `run_id`. `config` replaces the run's launch
+/// document; `None` reuses it, an empty one runs the definitions as they are.
 #[server]
-pub async fn rerun_run(run_id: String) -> Result<MaterializeResult, ServerFnError> {
+pub async fn rerun_run(
+    run_id: String,
+    config: Option<String>,
+) -> Result<MaterializeResult, ServerFnError> {
     use rivers_api::rivers::RerunRunRequest;
 
     let mut client = connect_to_run_owner(&run_id).await?;
@@ -217,6 +227,7 @@ pub async fn rerun_run(run_id: String) -> Result<MaterializeResult, ServerFnErro
         .rerun_run(RerunRunRequest {
             run_id,
             user: current_user_ref().await,
+            config,
         })
         .await
         .map_err(super::grpc_err)?;
@@ -334,6 +345,9 @@ pub async fn launch_backfill(
     /// it is the verb the page showed for the job: the backend refuses the
     /// backfill if the job now runs another one.
     action: Option<String>,
+    /// As for [`trigger_materialize`]; stored on the backfill and applied to
+    /// every child run.
+    config: Option<String>,
 ) -> Result<BackfillRerunResult, ServerFnError> {
     use rivers_api::rivers::LaunchBackfillRequest;
 
@@ -368,6 +382,7 @@ pub async fn launch_backfill(
             dry_run: false,
             job_name,
             user: current_user_ref().await,
+            config,
         })
         .await
         .map_err(super::grpc_err)?;
@@ -381,7 +396,8 @@ pub async fn launch_backfill(
 /// reported here — the UI navigates to the run page either way.
 /// `action` is the verb the page showed for the job (`None` materializes):
 /// the backend refuses the run if the job now runs another one.
-/// `whole_asset` is as for [`trigger_action`], for the job's verb.
+/// `whole_asset` and `config` are as for [`trigger_action`], for the job's
+/// verb and assets.
 #[server]
 pub async fn execute_job(
     loc_ns: String,
@@ -390,6 +406,7 @@ pub async fn execute_job(
     action: Option<String>,
     partition_key: Option<SubmitPartitionKey>,
     whole_asset: bool,
+    config: Option<String>,
 ) -> Result<MaterializeResult, ServerFnError> {
     use rivers_api::rivers::ExecuteJobRequest;
 
@@ -406,6 +423,7 @@ pub async fn execute_job(
             user: current_user_ref().await,
             whole_asset,
             action,
+            config,
         })
         .await
         .map_err(super::grpc_err)?;
@@ -520,4 +538,53 @@ pub async fn delete_runs(run_ids: Vec<String>) -> Result<BulkRunActionResult, Se
         }
     }
     Ok(BulkRunActionResult { requested, failed })
+}
+
+/// The errors each asset's config class reports for `config`, built as a
+/// run builds it: what a launch would be refused for, and what a run
+/// would hit at start.
+#[server]
+pub async fn validate_config(
+    loc_ns: String,
+    loc_name: String,
+    selection: Vec<String>,
+    action: Option<String>,
+    config: String,
+) -> Result<Vec<ConfigError>, ServerFnError> {
+    use rivers_api::rivers::{ValidateConfigRequest, config_loc};
+
+    use crate::types::ConfigLoc;
+
+    let state = expect_context::<crate::state::AppState>();
+    let (_, mut client) = state
+        .connect_to(&loc_ns, &loc_name)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let resp = client
+        .validate_config(ValidateConfigRequest {
+            selection,
+            config,
+            action,
+        })
+        .await
+        .map_err(super::grpc_err)?;
+    Ok(resp
+        .into_inner()
+        .errors
+        .into_iter()
+        .map(|e| ConfigError {
+            path: e.path,
+            loc: e
+                .loc
+                .into_iter()
+                .filter_map(|l| l.part)
+                .map(|part| match part {
+                    config_loc::Part::Key(key) => ConfigLoc::Key(key),
+                    config_loc::Part::Index(index) => ConfigLoc::Index(index),
+                })
+                .collect(),
+            message: e.message,
+            kind: e.kind,
+        })
+        .collect())
 }

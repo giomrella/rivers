@@ -28,6 +28,9 @@ service CodeLocationService {
   rpc CancelBackfill(CancelBackfillRequest) returns (CancelBackfillResponse);
   rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
   rpc DeleteRun(DeleteRunRequest) returns (DeleteRunResponse);
+  // Check a launch document with each selected asset's config class, as a run
+  // builds it, with the document's values or none.
+  rpc ValidateConfig(ValidateConfigRequest) returns (ValidateConfigResponse);
 }
 
 // --- Health & info ---
@@ -60,6 +63,10 @@ message MaterializeRequest {
   optional ProtoPartitionKey partition_key = 2;
   repeated Tag tags = 3;
   optional UserRef user = 4;
+  // The launch document as JSON: `{"assets": {"<asset>": {"config": {...},
+  // "metadata": {...}}}}`. Every asset named must be in the selection. Unset
+  // or empty means the definitions as they are. Stored on the run.
+  optional string config = 5;
 }
 
 message MaterializeResponse {
@@ -86,6 +93,8 @@ message ExecuteJobRequest {
   // The job runs its own verb, so a request naming another one (a page that
   // has not loaded the job, or loaded it before a redeploy) is rejected.
   optional string action = 5;
+  // As MaterializeRequest.config, naming the job's assets.
+  optional string config = 6;
 }
 
 message ExecuteJobResponse {
@@ -98,6 +107,10 @@ message ExecuteJobResponse {
 message RerunRunRequest {
   string run_id = 1;
   optional UserRef user = 2;
+  // A launch document (as MaterializeRequest.config) that replaces the one
+  // stored on the run. Unset reuses the stored one; empty runs with the
+  // definitions as they are.
+  optional string config = 3;
 }
 
 message RerunRunResponse {
@@ -142,9 +155,54 @@ message GetPartitionKeyIndexResponse {
   int64 index = 1;
 }
 
+message ValidateConfigRequest {
+  // The assets the launch would run; every asset `config` names must be one of them.
+  repeated string selection = 1;
+  // As MaterializeRequest.config.
+  string config = 2;
+  // The verb whose config class applies; unset means each asset's own.
+  optional string action = 3;
+}
+// One step of pydantic's `loc`: a field name or a list index.
+message ConfigLoc {
+  oneof part {
+    string key = 1;
+    uint32 index = 2;
+  }
+}
+message ConfigError {
+  // Where in the document the checked object sits, e.g. `assets`, the asset
+  // name, `config`.
+  repeated string path = 1;
+  // pydantic's `loc` inside that object; empty for the object itself.
+  repeated ConfigLoc loc = 2;
+  string message = 3;
+  // pydantic's error type ("missing", "int_parsing", "value_error", ...),
+  // "required" for a field a plain model needs and the document leaves unset
+  // ("missing" is a BaseSettings field the run's environment may set),
+  // "exception" for anything else a constructor raised, or "invalid" for a
+  // part of the document the definitions refuse.
+  string kind = 4;
+}
+message ValidateConfigResponse {
+  repeated ConfigError errors = 1;
+}
+
 message GetAssetsInfoRequest {}
 message GetAssetsInfoResponse {
   repeated AssetDefinitionInfo assets = 1;
+  // The resources a launch document may override.
+  repeated ResourceInfo resources = 2;
+}
+
+// A resource of the repository a launch document may override with field
+// values. An IO handler is not listed: nodes hold it through the registry.
+message ResourceInfo {
+  string key = 1;
+  // JSON schema of the resource's class. For an instance, each field's
+  // `default` is its current value (a secret's is left out) and nothing is
+  // `required`.
+  string config_schema = 2;
 }
 
 message AssetDefinitionInfo {
@@ -162,6 +220,11 @@ message AssetDefinitionInfo {
   optional string code_version = 12;
   string asset_type = 13;
   repeated ActionInfo actions = 14;
+  // JSON schema (pydantic `model_json_schema()`) of the config class the
+  // asset's context annotation names. Unset when the asset takes no config.
+  optional string config_schema = 15;
+  // The asset's metadata as defined; a launch document may add or replace keys.
+  map<string, string> metadata = 16;
 }
 
 message ActionInfo {
@@ -172,6 +235,8 @@ message ActionInfo {
   optional string description = 4;
   // "required" | "keyless" | "optional" — partition-key rule for the verb
   string partitioning = 5;
+  // As AssetDefinitionInfo.config_schema, for the action's own config class.
+  optional string config_schema = 6;
 }
 
 message PartitionDefInfo {
@@ -294,6 +359,8 @@ message RunActionRequest {
   // is Optional (delete) acts on every partition of a partitioned asset.
   // Such a keyless run is rejected unless this is set.
   bool whole_asset = 7;
+  // As MaterializeRequest.config, for the action's own config class.
+  optional string config = 8;
 }
 message RunActionResponse {
   string run_id = 1;
@@ -380,6 +447,9 @@ message LaunchBackfillRequest {
   // the verb the caller showed for the job, as in ExecuteJobRequest: a
   // backfill naming another verb than the job's own is rejected.
   optional string action = 11;
+  // As MaterializeRequest.config; stored on the backfill and applied to every
+  // child run.
+  optional string config = 12;
 }
 
 message LaunchBackfillResponse {

@@ -1,6 +1,8 @@
 //! DTO types for the UI — mirrors rivers-core types without surrealdb dependencies.
 //! Used in server function signatures so they work on both SSR and WASM hydration targets.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Format a partition key to match gRPC's `py_partition_key_display` (`Multi` →
@@ -202,6 +204,10 @@ pub struct RunRecord {
     /// The verb this run executes. `None` means materialize.
     #[serde(default)]
     pub action: Option<String>,
+    /// The launch document the run was launched with, as JSON text. `None`
+    /// means the definitions as they are.
+    #[serde(default)]
+    pub config: Option<String>,
 }
 
 /// Which verb a run filter selects. Explicit variants rather than a nested
@@ -621,6 +627,42 @@ pub struct AssetDefinitionInfo {
     /// Named actions this asset supports beyond materialize.
     #[serde(default)]
     pub actions: Vec<AssetActionInfo>,
+    /// JSON schema of the asset's config class; `None` when it takes no config.
+    #[serde(default)]
+    pub config_schema: Option<String>,
+    /// The asset's metadata as defined; a launch may add or replace keys.
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+/// A resource a launch document may override: its key and the JSON schema
+/// of its class (an instance's current values as the defaults).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceInfo {
+    pub key: String,
+    pub config_schema: String,
+}
+
+/// One step of pydantic's `loc`: a field name or a list index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConfigLoc {
+    Key(String),
+    Index(u32),
+}
+
+/// One error the definitions found in a launch document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigError {
+    /// Where in the document the checked object sits, e.g.
+    /// `["assets", "raw_users", "config"]`.
+    pub path: Vec<String>,
+    /// pydantic's `loc` inside that object; empty for the object itself.
+    pub loc: Vec<ConfigLoc>,
+    pub message: String,
+    /// pydantic's error type (`missing`, `int_parsing`, `value_error`, ...),
+    /// `required` for a plain model's field left unset, `exception`, or
+    /// `invalid` for a part the definitions refuse.
+    pub kind: String,
 }
 
 /// Mirror of the gRPC `ActionInfo`.
@@ -634,6 +676,9 @@ pub struct AssetActionInfo {
     #[serde(default)]
     pub partitioning: String,
     pub description: Option<String>,
+    /// JSON schema of the action's own config class; `None` when it takes none.
+    #[serde(default)]
+    pub config_schema: Option<String>,
 }
 
 impl AssetActionInfo {
@@ -1190,6 +1235,7 @@ mod conversions {
                 launched_by: r.launched_by.into(),
                 code_location_id: r.code_location_id,
                 action: r.action,
+                config: r.config,
             }
         }
     }
@@ -1612,6 +1658,7 @@ mod conversions {
                 error: None,
                 launched_by: rivers_core::storage::LaunchedBy::Manual { user: None },
                 action: Some("purge".into()),
+                config: None,
             };
             let ui: BackfillInfo = core.into();
             assert_eq!(ui.action.as_deref(), Some("purge"));
@@ -1641,6 +1688,7 @@ mod conversions {
                 block_reason: None,
                 launched_by: rivers_core::storage::LaunchedBy::Manual { user: None },
                 action: None,
+                config: None,
             };
             let ui: RunRecord = core.into();
             let preview = ui

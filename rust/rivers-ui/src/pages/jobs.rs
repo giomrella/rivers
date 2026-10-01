@@ -13,9 +13,11 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 
 use crate::components::execute_job_dialog::ExecuteJobDialog;
-use crate::components::icons::IconPlay;
+use crate::components::icons::{IconPlay, IconTrash};
 use crate::components::live::{LiveStatusChip, use_live_kick};
-use crate::components::ui_kit::{AssetStack, EmptyState, KindBadge, StatusChip, Topbar};
+use crate::components::ui_kit::{
+    AssetStack, EmptyState, KindBadge, SplitButton, StatusChip, Topbar,
+};
 use crate::helpers::{
     JobPartitionPicker, job_partition_picker, job_verb, replay_click, run_status_class,
     run_status_kind, short_id,
@@ -70,6 +72,8 @@ pub fn JobsListPage() -> impl IntoView {
     let navigate = leptos_router::hooks::use_navigate();
 
     let show_dialog = RwSignal::new(false);
+    let launch_resources =
+        crate::components::config_editor::use_launch_resources(loc, show_dialog.into());
     let dialog_job = RwSignal::new(String::new());
     let dialog_picker = RwSignal::new(JobPartitionPicker::None);
     let dialog_verb = RwSignal::new(None::<AssetActionInfo>);
@@ -77,6 +81,21 @@ pub fn JobsListPage() -> impl IntoView {
     let dialog_picker_signal: Signal<JobPartitionPicker> = dialog_picker.into();
     let dialog_verb_signal: Signal<Option<AssetActionInfo>> = dialog_verb.into();
     let exec_error = RwSignal::new(Option::<String>::None);
+    // The dialog's config editor reads the job's assets and their schemas.
+    let jobs_value = crate::helpers::resource_value(jobs);
+    let assets_info_value = crate::helpers::resource_value(assets_info);
+    let dialog_assets = Signal::derive(move || {
+        let job = dialog_job.get();
+        jobs_value
+            .get()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|j| j.name == job)
+            .map(|j| j.asset_selection)
+            .unwrap_or_default()
+    });
+    let asset_info_by_key = crate::helpers::definitions_by_key(assets_info_value);
 
     view! {
         <Topbar
@@ -101,6 +120,9 @@ pub fn JobsListPage() -> impl IntoView {
             job_name=dialog_job_signal
             picker=dialog_picker_signal
             verb=dialog_verb_signal
+            assets=dialog_assets
+            definitions=asset_info_by_key
+            resources=launch_resources
         />
 
         {move || exec_error.get().map(|msg| view! { <div class="error-msg" style="margin-bottom: 1rem">{msg}</div> })}
@@ -131,7 +153,7 @@ pub fn JobsListPage() -> impl IntoView {
                                 />
                             }.into_any());
                         }
-                        const GRID: &str = "grid-template-columns: 1.4fr 0.7fr 1.6fr 0.8fr 1.1fr 120px";
+                        const GRID: &str = "grid-template-columns: 1.4fr 0.7fr 1.6fr 0.8fr 1.1fr 136px";
                         view! {
                             <div class="grid-table">
                                 <div class="grid-table-head" style=GRID>
@@ -161,28 +183,45 @@ pub fn JobsListPage() -> impl IntoView {
                                     let row_picker =
                                         job_partition_picker(verb.as_ref(), &asset_selection, &asset_info_by_key);
                                     let destructive = verb.as_ref().is_some_and(|v| v.is_destructive());
-                                    let opens_dialog = !matches!(row_picker, JobPartitionPicker::None);
                                     let verb_name = verb.as_ref().map(|v| v.name.clone());
+                                    // The dialog picks partitions and edits config; a job
+                                    // needing neither runs on the click.
+                                    let opens_dialog = !matches!(row_picker, JobPartitionPicker::None)
+                                        || crate::components::config_editor::launch_takes_config(
+                                            &asset_selection,
+                                            &asset_info_by_key,
+                                            verb_name.as_deref(),
+                                        );
                                     let armed_label = verb_name.clone().unwrap_or_default();
 
                                     let (exec_pending, set_exec_pending) = signal(false);
                                     let armed = RwSignal::new(false);
                                     let navigate = navigate.clone();
                                     let nav_run = navigate.clone();
+                                    // The dialog edits the launch document for a
+                                    // job that would otherwise run on the click.
+                                    let open_dialog = {
+                                        let exec_name = exec_name.clone();
+                                        let row_picker = row_picker.clone();
+                                        let verb = verb.clone();
+                                        move || {
+                                            dialog_job.set(exec_name.clone());
+                                            dialog_picker.set(row_picker.clone());
+                                            dialog_verb.set(verb.clone());
+                                            show_dialog.set(true);
+                                        }
+                                    };
 
                                     let on_execute = {
                                         let ns = ns.clone();
                                         let name = name.clone();
-                                        let row_picker = row_picker.clone();
+                                        let open_dialog = open_dialog.clone();
                                         let shown = verb_name.clone();
                                         move |ev: leptos::ev::MouseEvent| {
                                             ev.prevent_default();
                                             ev.stop_propagation();
-                                            if !matches!(row_picker, JobPartitionPicker::None) {
-                                                dialog_job.set(exec_name.clone());
-                                                dialog_picker.set(row_picker.clone());
-                                                dialog_verb.set(verb.clone());
-                                                show_dialog.set(true);
+                                            if opens_dialog {
+                                                open_dialog();
                                                 return;
                                             }
                                             // A destructive verb takes a second click, as on the run page.
@@ -201,7 +240,7 @@ pub fn JobsListPage() -> impl IntoView {
                                             leptos::task::spawn_local(async move {
                                                 let path_ns = ns.clone();
                                                 let path_name = name.clone();
-                                                match execute_job(ns, name, n.clone(), shown, None, false).await {
+                                                match execute_job(ns, name, n.clone(), shown, None, false, None).await {
                                                     Ok(result) if !result.run_id.is_empty() => {
                                                         let path = loc_path(&path_ns, &path_name, &format!("runs/{}", result.run_id));
                                                         navigate(&path, Default::default());
@@ -266,23 +305,47 @@ pub fn JobsListPage() -> impl IntoView {
                                             }}
                                             {status_cell}
                                             {last_run_cell}
-                                            <button
-                                                class=if destructive { "btn btn-danger" } else { "btn" }
-                                                on:click=on_execute
-                                                disabled=move || exec_pending.get()
-                                                title="Execute job"
-                                            >
-                                                <IconPlay/>
-                                                {move || if exec_pending.get() {
-                                                    "Executing…".to_string()
-                                                } else if armed.get() {
-                                                    format!("Confirm {armed_label}?")
-                                                } else if opens_dialog {
-                                                    "Execute…".to_string()
+                                            {
+                                                let variant = if destructive { "btn-danger" } else { "btn-accent" };
+                                                let execute = view! {
+                                                    <button
+                                                        class=format!("btn {variant}")
+                                                        on:click=on_execute
+                                                        disabled=move || exec_pending.get()
+                                                        title="Execute job"
+                                                    >
+                                                        {if destructive { view! { <IconTrash/> }.into_any() } else { view! { <IconPlay/> }.into_any() }}
+                                                        {move || if exec_pending.get() {
+                                                            "Executing…".to_string()
+                                                        } else if armed.get() {
+                                                            format!("Confirm {armed_label}?")
+                                                        } else if opens_dialog {
+                                                            "Execute…".to_string()
+                                                        } else {
+                                                            "Execute".to_string()
+                                                        }}
+                                                    </button>
+                                                };
+                                                let cell = if opens_dialog {
+                                                    execute.into_any()
                                                 } else {
-                                                    "Execute".to_string()
-                                                }}
-                                            </button>
+                                                    view! {
+                                                        <SplitButton
+                                                            variant=variant
+                                                            disabled=Signal::derive(move || exec_pending.get())
+                                                            menu_label="Execute with config…"
+                                                            on_menu=Callback::new(move |()| {
+                                                                armed.set(false);
+                                                                open_dialog();
+                                                            })
+                                                        >
+                                                            {execute}
+                                                        </SplitButton>
+                                                    }
+                                                    .into_any()
+                                                };
+                                                view! { <span class="grid-cell-action">{cell}</span> }
+                                            }
                                         </A>
                                     }
                                 }).collect::<Vec<_>>()

@@ -344,7 +344,7 @@ a:hover { color: var(--accent-hover); }
     border-radius: var(--round-md);
 }
 
-/* Buttons. Variants: .btn (secondary), .btn-primary, .btn-danger. Sizes: default
+/* Buttons. Variants: .btn (secondary), .btn-primary, .btn-accent, .btn-danger. Sizes: default
  * 28px, .btn-small 22px; .btn-square makes an icon-only button. One size per row. */
 .btn {
     display: inline-flex;
@@ -391,6 +391,57 @@ a:hover { color: var(--accent-hover); }
     filter: brightness(1.1);
 }
 
+/* A button with a menu of variants on an attached chevron. */
+.btn-split { position: relative; display: inline-flex; }
+/* The split's halves share one outline; the chevron's left edge divides them. */
+.btn-split > .btn:first-child {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    border-right-width: 0;
+}
+.btn-split-toggle {
+    width: 24px;
+    padding: 0;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-left: 1px solid var(--border);
+}
+.btn-primary.btn-split-toggle {
+    border-left-color: color-mix(in srgb, var(--on-accent) 25%, transparent);
+}
+.btn-accent.btn-split-toggle { border-left-color: var(--accent-border); }
+.btn-danger.btn-split-toggle {
+    border-left-color: color-mix(in srgb, var(--error) 40%, transparent);
+}
+.btn-split-toggle svg { transform: rotate(90deg); }
+.btn-split-backdrop { position: fixed; inset: 0; z-index: 99; }
+.btn-split-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 100;
+    min-width: 200px;
+    padding: 4px;
+    background: var(--bg-hover);
+    border-radius: var(--round-md);
+    box-shadow: var(--shadow-pop);
+}
+.btn-split-menu-item {
+    display: block;
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: var(--round-sm);
+    background: none;
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: var(--fs-xs);
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.btn-split-menu-item:hover { background: var(--bg-surface-low); color: var(--accent); }
+
 .btn-danger {
     background: transparent;
     color: var(--error);
@@ -400,6 +451,18 @@ a:hover { color: var(--accent-hover); }
     background: color-mix(in srgb, var(--error) 10%, transparent);
     color: var(--error);
     border-color: var(--error);
+}
+
+/* A row's launch button: tinted like .btn-danger, quieter than .btn-primary. */
+.btn-accent {
+    background: var(--accent-bg-soft);
+    color: var(--accent);
+    border-color: var(--accent-border);
+}
+.btn-accent:hover:not(:disabled) {
+    background: var(--accent-bg);
+    color: var(--accent);
+    border-color: var(--accent);
 }
 
 /* Bare inline icon button: close (×), remove (×), copy. Needs an aria-label. */

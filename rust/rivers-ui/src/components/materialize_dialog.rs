@@ -1,17 +1,22 @@
 //! Materialize confirmation dialog.
 //!
 //! ≤2 selected partitions fire one `trigger_materialize` run each; a larger
-//! selection lands as a single backfill over the assets + chosen keys.
+//! selection lands as a single backfill over the assets + chosen keys. Every
+//! submit carries the config editor's per-asset overrides.
 
 use std::collections::HashMap;
 
 use leptos::prelude::*;
 
+use crate::components::config_editor::{ConfigEditor, use_launch_config};
 use crate::components::partition_picker::{PartitionPicker, WholeAssetChoice};
 use crate::helpers::{JobPartitionPicker, close_on_navigation, stale_status_kind};
 use crate::loc::{loc_path, use_current_location};
 use crate::server_fns::mutations::{launch_backfill, trigger_action, trigger_materialize};
-use crate::types::{AssetActionInfo, AssetRecord, StaleStatus, SubmitPartitionKey};
+use crate::types::{
+    AssetActionInfo, AssetDefinitionInfo, AssetRecord, ResourceInfo, StaleStatus,
+    SubmitPartitionKey,
+};
 
 /// Above this many selected partitions, submit one backfill instead of a run each.
 const BACKFILL_THRESHOLD: usize = 2;
@@ -106,6 +111,13 @@ pub fn MaterializeDialog(
     /// that may be confirming a destructive verb.
     #[prop(optional, into)]
     records_failed: Option<Signal<bool>>,
+    /// Asset definitions by key, for the config editor: each selected asset's
+    /// config schema (the verb's own declaration for an action run).
+    #[prop(optional, into)]
+    definitions: Option<Signal<HashMap<String, AssetDefinitionInfo>>>,
+    /// The resources a launch document may override, for the config editor.
+    #[prop(optional, into)]
+    resources: Option<Signal<Vec<ResourceInfo>>>,
 ) -> impl IntoView {
     let records_failed: Signal<bool> = records_failed.unwrap_or_else(|| Signal::derive(|| false));
     let verb_info: Signal<Option<AssetActionInfo>> =
@@ -122,7 +134,6 @@ pub fn MaterializeDialog(
     let (tag_val, set_tag_val) = signal(String::new());
     let (tags, set_tags) = signal(Vec::<(String, String)>::new());
     let (nav_to, set_nav_to) = signal(Option::<String>::None);
-
     Effect::new(move || {
         if show.get() {
             set_selected.set(asset_keys.get());
@@ -141,6 +152,16 @@ pub fn MaterializeDialog(
 
     let loc = use_current_location();
     close_on_navigation(show);
+    // The submit button waits for text without issues, from the schema at
+    // once and from the config classes shortly after.
+    let config = use_launch_config(
+        selected.into(),
+        definitions.unwrap_or_else(|| Signal::derive(HashMap::new)),
+        resources.unwrap_or_else(|| Signal::derive(Vec::new)),
+        verb,
+        loc,
+    );
+    let config_check = config.check;
 
     let materialize_action = Action::new(move |_: &()| {
         let sel = selected.get();
@@ -149,10 +170,12 @@ pub fn MaterializeDialog(
         let t = tags.get();
         let (ns, name) = loc.get_untracked();
         let verb = verb.get();
+        let cfg = config_check.get_untracked().payload;
         async move {
             let tags_opt = if t.is_empty() { None } else { Some(t) };
             if pks.len() > BACKFILL_THRESHOLD {
-                let r = launch_backfill(ns, name, Some(sel), pks, tags_opt, None, verb).await?;
+                let r =
+                    launch_backfill(ns, name, Some(sel), pks, tags_opt, None, verb, cfg).await?;
                 return Ok::<_, ServerFnError>(DialogOutcome::Backfill(r.backfill_id));
             }
             // ≤2 keys → a run each; empty pks (unpartitioned, or the whole asset
@@ -174,6 +197,7 @@ pub fn MaterializeDialog(
                             pk,
                             tags_opt.clone(),
                             whole,
+                            cfg.clone(),
                         )
                         .await?
                     }
@@ -184,6 +208,7 @@ pub fn MaterializeDialog(
                             Some(sel.clone()),
                             pk,
                             tags_opt.clone(),
+                            cfg.clone(),
                         )
                         .await?
                         .run_id
@@ -436,6 +461,13 @@ pub fn MaterializeDialog(
                             </div>
                         </div>
 
+                        <ConfigEditor
+                            schema=config.schema
+                            text=config.text
+                            reset=show
+                            check=config_check
+                        />
+
                         {move || materialize_action.value().get().and_then(|r| r.err()).map(|e| {
                             view! { <div class="error-msg">{crate::helpers::err_text(&e)}</div> }
                         })}
@@ -453,7 +485,10 @@ pub fn MaterializeDialog(
                                 }
                                 on:click=move |_| { materialize_action.dispatch(()); }
                                 disabled=move || {
-                                    if pending.get() || selected.get().is_empty() {
+                                    if pending.get()
+                                        || selected.get().is_empty()
+                                        || !config_check.get().issues.is_empty()
+                                    {
                                         return true;
                                     }
                                     is_partitioned.get()
